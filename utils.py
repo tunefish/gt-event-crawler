@@ -17,9 +17,7 @@ from bs4.element import Comment as BS4Comment
 from tabulate import tabulate
 
 
-logging.basicConfig()
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 
 MEDIA_FILEEXT = (

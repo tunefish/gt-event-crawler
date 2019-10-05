@@ -24,12 +24,14 @@ import utils
 
 
 logging.basicConfig()
+rootLogger = logging.getLogger()
+rootLogger.setLevel(logging.INFO)
+
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 
 class CrawlerConfig:
-    __slots__ = ('userAgent', 'retries', 'retryTimeout', 'timezone',
+    __slots__ = ('userAgent', 'logLevel', 'retries', 'retryTimeout', 'timezone',
                  'eventLength', 'backlog', 'mercurySearchBacklog',
                  'maxTokens', 'tokenRate', 'crawlerWeights', 'statusCodes',
                  'repository', 'jsonFile', 'icsFile')
@@ -46,6 +48,7 @@ class CrawlerConfig:
 
         # general
         cfg.userAgent = cp['general']['user_agent']
+        cfg.logLevel = cp['general']['log_level'].upper()
 
         # crawler defaults
         defaults = cp['crawler_defaults']
@@ -564,9 +567,9 @@ class RemoteCalendarCrawler:
 
             if isinstance(event, (set, frozenset, list, tuple)):
                 for ev in event:
-                    logger.info(ev)
+                    logger.debug(ev)
             elif event:
-                logger.info(event)
+                logger.debug(event)
         except ValueError as e:
             logger.error('Cannot fetch information for %s%s',
                          base=self.DOMAIN, url=eventURL)
@@ -1382,6 +1385,7 @@ def storeToGit(repo, config, icsSha, icsFileContent, jsonSha, jsonFileContent):
 
 def main(token, args):
     config = CrawlerConfig.fromIni(args.config)
+    rootLogger.setLevel(args.log or config.logLevel)
 
     crawler = Crawler(config)
     crawler.registerCalendarCrawler(MercuryBackendCrawler)
