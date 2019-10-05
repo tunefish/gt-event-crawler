@@ -27,7 +27,7 @@ MEDIA_FILEEXT = (
     '.jpeg',
     '.png',
     '.gif',
-    '.bmp', 
+    '.bmp',
     '.tiff',
     '.gifv',
     '.webm',

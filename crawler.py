@@ -10,6 +10,7 @@ import time
 import icalendar
 import pytz
 
+from base64 import b64decode
 from collections import defaultdict
 from configparser import ConfigParser
 from datetime import datetime, date, timedelta
@@ -906,7 +907,7 @@ class MercuryBackendCrawler(RemoteListCrawler):
             return next(elems, None)
         else:
             return label.parent
-        
+
 
 class CcGatechEduCrawler(RemoteMonthCrawler, RemoteWeekCrawler, RemoteDayCrawler):
     IDENTIFIER = 'cc.gatech.edu'
@@ -946,7 +947,7 @@ class CcGatechEduCrawler(RemoteMonthCrawler, RemoteWeekCrawler, RemoteDayCrawler
             return None
 
         soup = BeautifulSoup(details, 'html.parser')
-        
+
         event = RawEvent(self.IDENTIFIER, eventURL)
         event.setTitle(utils.Soup.getTextAt(soup, self.SELECTOR_EVENT_TITLE))
 
@@ -965,7 +966,7 @@ class CcGatechEduCrawler(RemoteMonthCrawler, RemoteWeekCrawler, RemoteDayCrawler
                                        self.SELECTOR_EVENT_ENDTIME,
                                        'content')
         event.setEnd(utils.normalizeDate(endTime, self.config.timezone))
-        
+
         location = utils.Soup.getTextAt(soup, self.SELECTOR_EVENT_LOCATION)
         event.setLocation(location)
         description, links = utils.Soup.tokenizeElemAt(soup,
@@ -1143,7 +1144,7 @@ class ChemistryGatechEduCrawler(RemoteListCrawler):
         event.setEnd(utils.normalizeDate(endTime, self.config.timezone))
 
         event.setLocation(utils.Soup.getTextAt(soup, self.SELECTOR_EVENT_LOCATION))
-        
+
         description, links = utils.Soup.tokenizeElemAt(soup,
                                                        self.SELECTOR_EVENT_DESCRIPTION,
                                                        base=eventURL)
@@ -1308,9 +1309,79 @@ class CampuslabsComCrawler(RemoteListCrawler):
         return events
 
 
-def main(token, configFile):
-    config = CrawlerConfig.fromIni(configFile)
+def loadFromGit(token, config):
+    icsDir, icsFileContent = os.path.split(config.icsFile)
+    jsonDir, jsonFileContent = os.path.split(config.jsonFile)
 
+    try:
+        git = Github(token)
+        repo = git.get_repo(config.repository)
+        contents = repo.get_dir_contents('.')
+        icsDir = repo.get_dir_contents(icsDir)
+        if jsonDir == icsDir:
+            jsonDir = icsDir
+        else:
+            jsonDir = repo.get_dir_contents(jsonDir)
+    except GithubException as e:
+        logger.error(f'Cannot open repository {config.repository}')
+        logger.exception(e)
+        return None, None, None, None
+
+    icsSha = None
+    jsonSha = None
+    for file in icsDir:
+        if file.name == config.icsFile:
+            icsSha = file.sha
+        elif file.name == config.jsonFile:
+            jsonSha = file.sha
+
+    if not icsSha:
+        logger.warning(f'No previous ICS file {config.icsFile} present!')
+    if not jsonSha:
+        logger.warning(f'No previous JSON file {config.jsonFile} present!')
+        return repo, icsSha, None, None
+
+    jsonFileContent = None
+    try:
+        jsonFileContent = repo.get_git_blob(jsonSha)
+        jsonFileContent = b64decode(jsonFileContent.content)
+    except GithubException as e:
+        logger.error(f'Cannot download previous JSON file {config.jsonFile}!')
+        logger.exception(e)
+
+    return repo, icsSha, jsonSha, jsonFileContent
+
+
+def storeToGit(repo, config, icsSha, icsFileContent, jsonSha, jsonFileContent):
+    try:
+        if icsSha:
+            repo.update_file(config.icsFile,
+                             f'Update {config.icsFile}',
+                             icsFileContent.to_ical(),
+                             icsSha)
+        else:
+            repo.create_file(config.icsFile,
+                             f'Initialize {config.icsFile}',
+                             icsFileContent.to_ical())
+
+        if jsonSha:
+            repo.update_file(config.jsonFile,
+                             f'Update {config.jsonFile}',
+                             json.dumps(jsonFileContent, indent=2),
+                             jsonSha)
+        else:
+            repo.create_file(config.jsonFile,
+                             f'Initialize {config.jsonFile}',
+                             json.dumps(jsonFileContent, indent=2))
+    except GithubException as e:
+        logger.error(f'Error: cannot push {config.icsFile} and {config.jsonFile} to repository:')
+        logger.exception(e)
+        return False
+    return True
+
+
+def main(token, args):
+    config = CrawlerConfig.fromIni(args.config)
 
     crawler = Crawler(config)
     crawler.registerCalendarCrawler(MercuryBackendCrawler)
@@ -1322,70 +1393,31 @@ def main(token, configFile):
     crawler.discover()
     crawler.resolve()
 
-    git = Github(token)
-    repo = git.get_repo(config.repository)
+    repo, icsSha, jsonSha, jsonFileContent = loadFromGit(token, config)
+    if not repo:
+        return 1
 
-    updateJson = False
-    updateIcs = False
-    try:
-        icsFile = repo.get_contents(config.icsFile)
-        icsSha = icsFile.sha
-        logger.info(f'Previous ICS: {icsSha}')
-        updateIcs = True
-    except UnknownGithubObjectException:
-        updateIcs = False
+    if args.ignore_previous_crawls:
+        jsonFileContent = None
 
-    try:
-        jsonFile = repo.get_contents(config.jsonFile)
-        previousEvents = json.loads(jsonFile.decoded_content)
-        logger.info(f'Previous JSON: {jsonFile.sha}')
-        updateJson = True
-    except UnknownGithubObjectException as e:
-        logger.warning('Cannot read previous events:')
-        logger.exception(e)
-        previousEvents = ()
-        updateJson = False
-
-    jsonRes, icsRes, hasNew = crawler.export(previousEvents)
+    previousEvents = json.loads(jsonFileContent or '[]')
+    jsonContent, icsContent, hasNew = crawler.export(previousEvents)
 
     if not hasNew:
         logger.info('No new events')
         return 0
 
-    try:
-        if updateJson:
-            print(len(json.dumps(jsonRes, indent=2)))
-            repo.update_file(config.jsonFile,
-                             f'Update {config.jsonFile}',
-                             json.dumps(jsonRes, indent=2),
-                             jsonFile.sha)
-        else:
-            repo.create_file(config.jsonFile,
-                             f'Initialize {config.jsonFile}',
-                             json.dumps(jsonRes, indent=2))
-    except GithubException as e:
-        logger.error(f'Error: cannot push {config.jsonFile} to repository: {e}')
-        return 2
-
-    try:
-        if updateIcs:
-            repo.update_file(config.icsFile,
-                             f'Update {config.icsFile}',
-                             icsRes.to_ical(),
-                             icsSha)
-        else:
-            repo.create_file(config.icsFile,
-                             f'Initialize {config.icsFile}',
-                             icsRes.to_ical())
-    except GithubException as e:
-        logger.error(f'Error: cannot push {config.icsFile} to repository: {e}')
-        return 2
-    return 0
+    res = storeToGit(repo, config, icsSha, icsContent, jsonSha, jsonContent)
+    return 0 if res else 1
 
 
 def parseArgs():
     parser = argparse.ArgumentParser(description='Crawls event across departments at Georgia Tech')
-    parser.add_argument('--config', '-c', required=True)
+    parser.add_argument('--config', '-c', required=True, help='Path to the parser config file')
+    parser.add_argument('--log', '-l', choices=('NOTSET', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'),
+                        default=None, help='Log level')
+    parser.add_argument('--ignore-previous-crawls', '-i', default=False,
+                        action='store_true', help='Ignore events from previous crawls')
     return parser.parse_args()
 
 
@@ -1397,4 +1429,4 @@ if __name__ == '__main__':
 
     args = parseArgs()
 
-    exit(main(token, args.config))
+    exit(main(token, args))
