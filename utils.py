@@ -422,11 +422,13 @@ class HTMLToText:
 
 
 class Requester:
-    __slots__ = ('userAgent', 'retries', 'retryTimeout',
+    __slots__ = ('session', 'userAgent', 'retries', 'retryTimeout',
                  'buckets', 'maxTokens', 'tokenRate')
 
     def __init__(self, userAgent=None, retries=None, retryTimeout=None,
                  maxTokens=10000, tokenRate=10000):
+        self.session = requests.Session()
+
         self.userAgent = userAgent
         self.retries = retries
         self.retryTimeout = retryTimeout
@@ -462,10 +464,11 @@ class Requester:
 
         for n in range(self.retries if retries is None else retries):
             try:
-                response = requests.request(method,
-                                            url,
-                                            headers={"User-Agent": self.userAgent},
-                                            data=data)
+                # TODO: use urllib3's Retry
+                response = self.session.request(method,
+                                                url,
+                                                headers={"User-Agent": self.userAgent},
+                                                data=data)
             except Exception as e:
                 logger.error(f'{url}: exception (attempt {n})')
                 logger.exception(e)
