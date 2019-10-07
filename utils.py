@@ -4,12 +4,14 @@ import logging
 import math
 import operator
 import re
-import time
 
-from datetime import datetime, date
+from datetime import datetime, time, date
+from time import monotonic as time_monotonic
+from time import sleep as time_sleep
 from urllib.parse import urlparse, urljoin
 
 import icalendar
+import pytz
 import requests
 
 from bs4 import BeautifulSoup
@@ -46,8 +48,10 @@ def intLen(i):
 
 
 def normalizeDate(d, timezone=None):
-    if isinstance(d, datetime) and timezone and not d.tzinfo:
-        return timezone.localize(d)
+    if isinstance(d, (datetime, time)):
+        if not d.tzinfo and timezone:
+            d = timezone.localize(d)
+        return d.astimezone(pytz.utc)
     return d
 
 
@@ -66,6 +70,23 @@ def addMonths(d, months):
     month = month % 12 + 1
     day = min(d.day, calendar.monthrange(year, month)[1])
     return date(year, month, day)
+
+
+def parseIsoDateOrDatetime(iso):
+    try:
+        return date.fromisoformat(iso)
+    except ValueError:
+        pass
+
+    try:
+        return time.fromisoformat(iso)
+    except ValueError:
+        pass
+
+    try:
+        return datetime.fromisoformat(iso)
+    except ValueError:
+        return None
 
 
 def normalizeURL(base=None, url=None):
@@ -128,10 +149,16 @@ def isSubsequenceByWord(subseq, string):
     return all(word in string for word in subseq)
 
 
+def sortStringList(strList):
+    if strList is None:
+        return None
+    return ', '.join(sorted(map(str.strip, strList.split(','))))
+
+
 def mergeStringLists(mainList, mergeList):
-    entries = list(map(str.strip, mainList.split(',')))
+    entries = list(filter(None, map(str.strip, mainList.split(','))))
     entriesLower = list(map(str.lower, entries))
-    for entry in map(str.strip, mergeList.split(',')):
+    for entry in filter(None, map(str.strip, mergeList.split(','))):
         if entry.lower() not in entriesLower:
             entries.append(entry)
             entriesLower.append(entry.lower())
@@ -168,11 +195,11 @@ class Soup:
         return HTMLToText.tokenizeSoup(elem, **kwargs)
 
     @staticmethod
-    def getTimeAt(elem, selector, attr):
-        return Soup.getElemTime(firstOrNone(elem.select(selector)), attr)
+    def getDatetimeAt(elem, selector, attr):
+        return Soup.getElemDatetime(firstOrNone(elem.select(selector)), attr)
 
     @staticmethod
-    def getElemTime(elem, attr):
+    def getElemDatetime(elem, attr):
         if not elem or not elem.name or attr not in elem.attrs:
             return None
         return datetime.fromisoformat(elem.attrs[attr])
@@ -408,10 +435,10 @@ class HTMLToText:
         renderedText = re.sub(r'\n{3,}', '\n\n', fragments)
 
         # Step 2a: assign IDs to links not referenced by a ReplaceLink token
-        for link, ctr in linkMap.items():
-            if ctr == -1:
-                linkMap[link] = counter
-                counter+= 1
+        unassignedLinks = filter(lambda l: l[1] == -1, linkMap.items())
+        for link, ctr in sorted(unassignedLinks, key=operator.itemgetter(0)):
+            linkMap[link] = counter
+            counter+= 1
 
         # Step 2b: render links section
         sortedLinks = sorted(linkMap.items(), key=operator.itemgetter(1))
@@ -475,7 +502,8 @@ class Requester:
                 continue
 
             if response.status_code != 200:
-                logger.error(f'{url}: status code {response.status_code} (attempt {n})\n{response.headers}\n{response.text:1000}')
+                if not (500 <= response.status_code < 600):
+                    logger.error(f'{url}: status code {response.status_code} (attempt {n})\n{response.headers}\n{response.text:1000}')
                 continue
 
             if n:
@@ -508,7 +536,7 @@ class Requester:
         if host.startswith('www.'):
             host = host[4:]
 
-        now = time.monotonic()
+        now = time_monotonic()
 
         # load state
         if host not in self.buckets:
@@ -529,10 +557,10 @@ class Requester:
         else:
             wait = (1 - tokens)/self.tokenRate
             wait = math.ceil(wait*1000)/1000
-            time.sleep(wait)
+            time_sleep(wait)
 
             tokens = 0
-            lastToken = time.monotonic()
+            lastToken = time_monotonic()
 
         # store state
         self.buckets[host] = (tokens, lastToken)

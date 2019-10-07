@@ -5,7 +5,6 @@ import json
 import logging
 import operator
 import os
-import time
 
 import icalendar
 import pytz
@@ -13,7 +12,8 @@ import pytz
 from base64 import b64decode
 from collections import defaultdict
 from configparser import ConfigParser
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, time, timedelta
+from time import monotonic as time_monotonic
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
@@ -81,6 +81,7 @@ class CrawlerConfig:
 
 
 class RawEvent:
+    BASE_TZ = pytz.utc
     __slots__ = ('crawler', 'url', 'alternativeUrls', 'title', 'start', 'end',
                  'location', 'extras', 'description', 'links', 'audience',
                  'status')
@@ -115,14 +116,14 @@ class RawEvent:
             raise ValueError('Event must have a start time and date!')
         self.start = start
 
-    def setEnd(self, end, timezone=None):
+    def setEnd(self, end):
         self.end = end
 
     def setLocation(self, location):
         self.location = location
 
     def setExtras(self, extras):
-        self.extras = extras
+        self.extras = utils.sortStringList(extras)
 
     def setDescription(self, description):
         self.description = description
@@ -131,7 +132,7 @@ class RawEvent:
         self.links = links
 
     def setAudience(self, audience):
-        self.audience = audience
+        self.audience = utils.sortStringList(audience)
 
     def setStatus(self, status):
         self.status = status.lower()
@@ -140,7 +141,11 @@ class RawEvent:
         return self.title and self.start
 
     def getDescription(self):
-        return utils.HTMLToText.renderTokens(self.description, ())[0]
+        sLinks = (self.url, *(sorted(self.alternativeUrls or ())))
+        description, _ = utils.HTMLToText.renderTokens(self.description,
+                                                       (),
+                                                       specialLinks=sLinks)
+        return description
 
     def toIcal(self, config):
         event = icalendar.Event()
@@ -156,14 +161,14 @@ class RawEvent:
         return {
             'crawler':         self.crawler,
             'url':             self.url,
-            'alternativeUrls': tuple(self.alternativeUrls or ()),
+            'alternativeUrls': sorted(self.alternativeUrls or ()),
             'title':           self.title,
             'start':           self.start.isoformat(),
             'end':             self.end.isoformat() if self.end else None,
             'location':        self.location,
             'extras':          self.extras,
             'description':     self.getDescription(),
-            'links':           tuple(self.links or ()),
+            'links':           sorted(self.links or ()),
             'audience':        self.audience,
             'status':          self.status,
         }
@@ -171,11 +176,12 @@ class RawEvent:
     @classmethod
     def fromJSON(cls, jObj):
         event = cls(jObj['crawler'], jObj['url'])
-        event.setAlternativeUrls(jObj['alternativeUrls'])
         event.setTitle(jObj['title'])
-        event.setStart(datetime.fromisoformat(jObj['start']))
+        event.setStart(utils.parseIsoDateOrDatetime(jObj['start']))
+        if jObj['alternativeUrls']:
+            event.setAlternativeUrls(set(jObj['alternativeUrls']))
         if jObj['end']:
-            event.setEnd(datetime.fromisoformat(jObj['end']))
+            event.setEnd(utils.parseIsoDateOrDatetime(jObj['end']))
         if jObj['location']:
             event.setLocation(jObj['location'])
         if jObj['extras']:
@@ -201,47 +207,46 @@ class RawEvent:
 
         crawlerW = crawlerWeights.get(self.crawler, 25)
         otherCrawlerW = crawlerWeights.get(other.crawler, 25)
-        if (otherStatC > statC
-            or (otherStatC == statC and otherCrawlerW > crawlerW)):
+        if (otherStatC, otherCrawlerW, other.url) > (statC, crawlerW, self.url):
             # other event has higher weight, merge this event into the other one
             return other.merge(self, statusCodes, crawlerWeights)
 
-        self.alternativeUrls = self.alternativeUrls or frozenset()
-        self.alternativeUrls|= (set((other.url,))
-                                | (other.alternativeUrls or set()))
+        altUrls = ((self.alternativeUrls or frozenset())
+                   | set((other.url,))
+                   | (other.alternativeUrls or frozenset()))
+        self.setAlternativeUrls(altUrls)
 
-        if not self.location:
-            self.location = other.location
-        elif (other.location
-              and self.location.lower() in other.location.lower()
-              and len(self.location) < len(other.location)):
-            self.location = other.location
+        if (not self.location
+            or (other.location
+                and self.location.lower() in other.location.lower()
+                and len(self.location) < len(other.location))):
+            self.setLocation(other.location)
 
         if not self.extras:
-            self.extras = other.extras
+            self.setExtras(other.extras)
         elif other.extras:
-            self.extras = utils.mergeStringLists(self.extras, other.extras)
+            self.setExtras(utils.mergeStringLists(self.extras, other.extras))
 
         if not self.description:
-            self.description = other.description
+            self.setDescription(other.description)
         elif other.description:
             # get rid of formatting, we only care about the unformatted text
             desc = self.getDescription()
             otherDesc = other.getDescription()
             if utils.isSubsequenceByWord(desc, otherDesc):
-                self.description = other.description
+                self.setDescription(other.description)
             elif not utils.isSubsequenceByWord(otherDesc, desc):
-                logger.warning(f'The events {self} and {other} have different descriptions!')
-                self.description = (*self.description,
-                                    '\n\n',
-                                    *other.description)
+                logger.warning(f'The event {self} from {self.url} and {other.url} have different descriptions!')
+                self.setDescription((*self.description,
+                                     '\n\n',
+                                     *other.description))
 
-        self.links|= other.links or set()
+        self.setLinks(self.links | (other.links or frozenset()))
 
         if not self.audience:
-            self.audience = other.audience
+            self.setAudience(other.audience)
         elif other.audience:
-            self.audience = utils.mergeStringLists(self.audience, other.audience)
+            self.setAudience(utils.mergeStringLists(self.audience, other.audience))
 
         # no need to update status, since we want to keep the higher status code
         # and if this part of the code is reached this event's status is GTE
@@ -255,7 +260,7 @@ class RawEvent:
         status = f'Status: {self.status or "unknown"}'
         meta = '\n'.join(filter(None, (audience, extras, status)))
 
-        sLinks = (self.url, *(self.alternativeUrls or ()))
+        sLinks = (self.url, *(sorted(self.alternativeUrls or ())))
         description, links = utils.HTMLToText.renderTokens(self.description or (),
                                                            self.links or (),
                                                            specialLinks=sLinks)
@@ -271,21 +276,31 @@ class RawEvent:
             return datetime(*refDate.timetuple()[:6])
 
     def definingTuple(self):
-        return (self.title, self.start, self.end)
+        # This tuple defines the uniqueness of an event for deduplication
+        titleClean = ''.join(filter(str.isalnum, self.title.lower()))
+        return titleClean, self.start, self.end
 
     def compTuple(self, config):
+        # This tuple should be used for sorting events (by date, then title)
         start = self.start
         end = self.end
         if not isinstance(start, datetime):
             start = datetime(*start.timetuple()[:6])
         if not start.tzinfo:
-            start = start.replace(tzinfo=config.timezone)
-        if not end:
-            if not isinstance(start, datetime):
+            start = config.timezone.localize(start)
+        if end:
+            if not isinstance(end, datetime):
+                end = datetime(*end.timetuple()[:6])
+            if not end.tzinfo:
+                end = config.timezone.localize(end)
+        else:
+            if not isinstance(self.start, datetime):
                 end = start + timedelta(days=1)
             else:
                 end = start + config.eventLength
-        return start, end, self.title
+
+        titleClean = ''.join(filter(str.isalnum, self.title.lower()))
+        return start, end, titleClean
 
     def __eq__(self, other):
         return (isinstance(other, RawEvent)
@@ -298,31 +313,38 @@ class RawEvent:
         return hash(self.definingTuple())
 
     def __str__(self):
-        if self.start and self.end:
-            sDate = utils.getDate(self.start)
-            eDate = utils.getDate(self.end)
+        start = self.start
+        end = self.end
+        if isinstance(self.start, (datetime, time)):
+            start = self.start.astimezone(RawEvent.BASE_TZ)
+        if isinstance(self.end, (datetime, time)):
+            end = self.end.astimezone(RawEvent.BASE_TZ)
 
-            if not isinstance(self.start, datetime):
-                evDate = self.start.strftime('%B %d %Y')
+        if start and end:
+            sDate = utils.getDate(start)
+            eDate = utils.getDate(end)
+
+            if not isinstance(start, datetime):
+                evDate = start.strftime('%B %d %Y')
             else:
-                evDate = self.start.strftime('%B %d %Y from %H:%M (%Z)')
+                evDate = start.strftime('%B %d %Y from %H:%M')
 
             if sDate == eDate:
-                if isinstance(self.end, datetime):
-                    evDate+= self.end.strftime(' to %H:%M (%Z)')
+                if isinstance(end, datetime):
+                    evDate+= end.strftime(' to %H:%M')
             else:
-                if not isinstance(self.end, datetime):
-                    evDate+= self.end.strftime(' to %B %d %Y')
+                if not isinstance(end, datetime):
+                    evDate+= end.strftime(' to %B %d %Y')
                 else:
-                    evDate+= self.end.strftime(' to %B %d %Y at %H:%M (%Z)')
-        elif self.start:
-            if not isinstance(self.start, datetime):
-                evDate = self.start.strftime('%B %d %Y')
+                    evDate+= end.strftime(' to %B %d %Y at %H:%M')
+        elif start:
+            if not isinstance(start, datetime):
+                evDate = start.strftime('%B %d %Y')
             else:
-                evDate = self.start.strftime('%B %d %Y at %H:%M (%Z)')
+                evDate = start.strftime('%B %d %Y at %H:%M')
         else:
             evDate = '<unknown date>'
-        extra = (' (%s)' % self.extras) if self.extras else ''
+        extra = f' ({self.extras})' if self.extras else ''
         return f'{self.title}, at {self.location or "<somewhere>"} on {evDate}{extra}'
 
     def __repr__(self):
@@ -362,12 +384,12 @@ class Crawler:
             logger.error(f'An error occurred while trying to obtain a list of events for calendar {calendar.IDENTIFIER}')
             logger.exception(e)
 
-        t_start = time.monotonic()
+        t_start = time_monotonic()
         for calendar in self.calendars:
             exceptionCount = 0
             calDate = datetime.now()
             events = None
-            t_calendar = time.monotonic()
+            t_calendar = time_monotonic()
 
             if isinstance(calendar, RemoteListCrawler):
                 try:
@@ -419,10 +441,10 @@ class Crawler:
                 logger.error(f'Unknown calendar type {type(calendar)}')
                 continue
 
-            stats[calendar]+= time.monotonic() - t_calendar
+            stats[calendar]+= time_monotonic() - t_calendar
             logger.debug(f'Found {len(self.events[calendar])} events in total for {calendar.IDENTIFIER}')
 
-        t_end = time.monotonic()
+        t_end = time_monotonic()
         logger.info(f'Event discovery took {t_end - t_start}s')
 
         tableData = tuple((cal.IDENTIFIER, len(self.events[cal]), stats[cal])
@@ -436,7 +458,7 @@ class Crawler:
                                                                      footers))
 
     def resolve(self, timeout=0):
-        t_start = time.monotonic()
+        t_start = time_monotonic()
         stats = {cal: {'fail': 0,
                        'success': 0,
                        'events': len(self.events[cal]),
@@ -448,7 +470,7 @@ class Crawler:
         while hasEvents:
             hasEvents = False
             for calendar in self.calendars:
-                t_calendar = time.monotonic()
+                t_calendar = time_monotonic()
                 if self.events[calendar]:
                     hasEvents = True
                     ev = self.events[calendar].pop()
@@ -473,9 +495,9 @@ class Crawler:
                         logger.error(f'An error occurred while trying to obtain the details of event {ev}')
                         logger.exception(e)
                         stats[calendar]['fail']+= 1
-                stats[calendar]['time']+= time.monotonic() - t_calendar
+                stats[calendar]['time']+= time_monotonic() - t_calendar
 
-        t_end = time.monotonic()
+        t_end = time_monotonic()
         logger.info(f'Event resolution took {t_end - t_start}s')
 
         headers = ('Calendar', 'Failure', 'Success', 'Total', 'Processing Time (s)')
@@ -511,6 +533,7 @@ class Crawler:
         cal.add('version', '2.0')
 
         eventMap = dict()
+        eventUrls = dict()
 
         # first add previously crawled events
         now = datetime.now()
@@ -518,6 +541,14 @@ class Crawler:
             event = RawEvent.fromJSON(event)
             if now - event.refDate() > self.config.backlog:
                 continue
+
+            # URLs from previous crawls should be unique anyway
+            if event.url in eventUrls:
+                continue
+
+            for url in (event.alternativeUrls or ()):
+                eventUrls[url] = event
+            eventUrls[event.url] = event
 
             tpl = event.definingTuple()
             if tpl not in eventMap:
@@ -532,13 +563,33 @@ class Crawler:
         # add events crawled by this crawler
         hasNew = False
         for tpl, event in self.crawledEvents.items():
-            if tpl not in eventMap:
-                hasNew = True
-                eventMap[tpl] = event
+            if event.url in eventUrls:
+                # updating an event previously crawled
+                oldEvent = eventUrls[event.url]
+                oldTpl = oldEvent.definingTuple()
+                hasNew|= event != oldEvent
+
+                # delete old entries
+                for url in (oldEvent.alternativeUrls or ()):
+                    del eventUrls[url]
+                del eventMap[oldTpl]
+
+                # add/update new ones
+                eventUrls[event.url] = eventMap[tpl] = event
+                for url in (event.alternativeUrls or ()):
+                    eventUrls[url] = event
             else:
-                eventMap[tpl] = eventMap[tpl].merge(event,
-                                                    self.config.statusCodes,
-                                                    self.config.crawlerWeights)
+                if tpl not in eventMap:
+                    hasNew = True
+                    eventMap[tpl] = event
+                    eventUrls[event.url] = event
+                else:
+                    oldEvent = eventMap[tpl]
+                    del eventUrls[oldEvent.url]
+                    event = eventMap[tpl].merge(event,
+                                                self.config.statusCodes,
+                                                self.config.crawlerWeights)
+                    eventMap[tpl] = eventUrls[event.url] = event
 
         logger.info(f'After crawling: {len(eventMap)} events.')
 
@@ -706,7 +757,6 @@ class MercuryBackendCrawler(RemoteListCrawler):
                 break
 
             page+= 1
-            time.sleep(1)
 
         return events
 
@@ -954,20 +1004,20 @@ class CcGatechEduCrawler(RemoteMonthCrawler, RemoteWeekCrawler, RemoteDayCrawler
         event = RawEvent(self.IDENTIFIER, eventURL)
         event.setTitle(utils.Soup.getTextAt(soup, self.SELECTOR_EVENT_TITLE))
 
-        startTime = utils.Soup.getTimeAt(soup,
-                                         self.SELECTOR_EVENT_STARTTIME,
-                                         'content')
-        if not startTime:
-            startTime = utils.Soup.getTimeAt(soup,
-                                             self.SELECTOR_EVENT_SINGLETIME,
+        startTime = utils.Soup.getDatetimeAt(soup,
+                                             self.SELECTOR_EVENT_STARTTIME,
                                              'content')
+        if not startTime:
+            startTime = utils.Soup.getDatetimeAt(soup,
+                                                 self.SELECTOR_EVENT_SINGLETIME,
+                                                 'content')
             if not startTime:
                 logger.error(f'Unable to parse start time for {eventURL}')
                 return None
         event.setStart(utils.normalizeDate(startTime, self.config.timezone))
-        endTime = utils.Soup.getTimeAt(soup,
-                                       self.SELECTOR_EVENT_ENDTIME,
-                                       'content')
+        endTime = utils.Soup.getDatetimeAt(soup,
+                                           self.SELECTOR_EVENT_ENDTIME,
+                                           'content')
         event.setEnd(utils.normalizeDate(endTime, self.config.timezone))
 
         location = utils.Soup.getTextAt(soup, self.SELECTOR_EVENT_LOCATION)
@@ -1386,6 +1436,8 @@ def storeToGit(repo, config, icsSha, icsFileContent, jsonSha, jsonFileContent):
 def main(token, args):
     config = CrawlerConfig.fromIni(args.config)
     rootLogger.setLevel(args.log or config.logLevel)
+
+    RawEvent.BASE_TZ = config.timezone
 
     crawler = Crawler(config)
     crawler.registerCalendarCrawler(MercuryBackendCrawler)
