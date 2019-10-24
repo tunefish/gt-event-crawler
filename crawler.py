@@ -1085,7 +1085,8 @@ class ChemistryGatechEduCrawler(RemoteListCrawler):
                 logger.error(f'Cannot parse date string {startStr} and {endStr}')
                 logger.exception(e)
                 return startTime, endTime
-            return startTime, startTime.replace(hour=endTime.hour, minute=endTime.minute)
+            return startTime, startTime.replace(hour=endTime.hour,
+                                                minute=endTime.minute)
 
         if not startStr:
             return None, None
@@ -1199,7 +1200,10 @@ class CampuslabsComCrawler(RemoteListCrawler):
             startTime = datetime.fromisoformat(event['startsOn'])
             startTime = utils.normalizeDate(startTime, self.config.timezone)
 
-            rawEvent = RawEvent(self.IDENTIFIER, eventURL, event['name'], startTime)
+            rawEvent = RawEvent(self.IDENTIFIER,
+                                eventURL,
+                                event['name'],
+                                startTime)
 
             if 'endsOn' in event:
                 endTime = datetime.fromisoformat(event['endsOn'])
