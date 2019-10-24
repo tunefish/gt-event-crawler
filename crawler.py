@@ -962,155 +962,9 @@ class MercuryBackendCrawler(RemoteListCrawler):
             return label.parent
 
 
-class CcGatechEduCrawler(RemoteMonthCrawler, RemoteWeekCrawler, RemoteDayCrawler):
-    IDENTIFIER = 'cc.gatech.edu'
-    DOMAIN = 'https://www.cc.gatech.edu'
-    MONTHURL = '/calendar/month/%Y-%m'
-    WEEKURL = '/calendar/week/%Y-W%W'
-    DAYURL = '/calendar/day/%Y-%m-%d'
-
-    SELECTOR_EVENT_LINK = '.calendar .views-field-title a'
-
-    SELECTOR_EVENT_TITLE = '#page #main #page-title h2'
-    SELECTOR_EVENT_SINGLETIME = '#page #main .content .date-display-single'
-    SELECTOR_EVENT_STARTTIME = '#page #main .content .date-display-start'
-    SELECTOR_EVENT_ENDTIME = '#page #main .content .date-display-end'
-    SELECTOR_EVENT_LOCATION = '#page #main .content .field-name-field-event-location .field-item'
-    SELECTOR_EVENT_DESCRIPTION = '#page #main .content .field-name-field-event-body .field-item'
-    SELECTOR_EVENT_LINKS = '#page #main .content a'
-
-    def getMonthEventList(self, year, month):
-        urlPattern = utils.normalizeURL(base=self.DOMAIN, url=self.MONTHURL)
-        url = utils.strfURL(urlPattern, year=year, month=month)
-        return utils.getLinksAtURL(self.requester, url, self.SELECTOR_EVENT_LINK)
-
-    def getWeekEventList(self, year, week):
-        urlPattern = utils.normalizeURL(base=self.DOMAIN, url=self.MONTHURL)
-        url = utils.strfURL(urlPattern, year=year, week=week)
-        return utils.getLinksAtURL(self.requester, url, self.SELECTOR_EVENT_LINK)
-
-    def getDayEventList(self, year, month, day):
-        urlPattern = utils.normalizeURL(base=self.DOMAIN, url=self.MONTHURL)
-        url = utils.strfURL(urlPattern, year=year, month=month, day=day)
-        return utils.getLinksAtURL(self.requester, url, self.SELECTOR_EVENT_LINK)
-
-    def _getEventDetails(self, eventURL):
-        details = self.requester.fetchURL(eventURL)
-        if not details:
-            return None
-
-        soup = BeautifulSoup(details, 'html.parser')
-
-        event = RawEvent(self.IDENTIFIER, eventURL)
-        event.setTitle(utils.Soup.getTextAt(soup, self.SELECTOR_EVENT_TITLE))
-
-        startTime = utils.Soup.getDatetimeAt(soup,
-                                             self.SELECTOR_EVENT_STARTTIME,
-                                             'content')
-        if not startTime:
-            startTime = utils.Soup.getDatetimeAt(soup,
-                                                 self.SELECTOR_EVENT_SINGLETIME,
-                                                 'content')
-            if not startTime:
-                logger.error(f'Unable to parse start time for {eventURL}')
-                return None
-        event.setStart(utils.normalizeDate(startTime, self.config.timezone))
-        endTime = utils.Soup.getDatetimeAt(soup,
-                                           self.SELECTOR_EVENT_ENDTIME,
-                                           'content')
-        event.setEnd(utils.normalizeDate(endTime, self.config.timezone))
-
-        location = utils.Soup.getTextAt(soup, self.SELECTOR_EVENT_LOCATION)
-        event.setLocation(location)
-        description, links = utils.Soup.tokenizeElemAt(soup,
-                                                       self.SELECTOR_EVENT_DESCRIPTION,
-                                                       base=eventURL)
-        newLinks = utils.Soup.getLinksAt(soup, self.SELECTOR_EVENT_LINKS)
-        links|= set(filter(None, map(utils.normalizeURL(base=eventURL), newLinks)))
-        event.setDescription(description)
-        event.setLinks(links)
-
-        return event
-
-
-# TODO: exclude event share links
-class BmeGatechEduCrawler(RemoteListCrawler):
-    IDENTIFIER = 'bme.gatech.edu'
-    DOMAIN = 'https://www.bme.gatech.edu'
-    URL = '/bme/events'
-
-    SELECTOR_EVENT_LINK = '#page #main #content .view-content .eventxt a'
-
-    SELECTOR_EVENT_DESCRIPTION = '#page #main #content .field-name-body .field-item'
-    SELECTOR_EVENT_LINKS = '#page #main a'
-    SELECTOR_EVENT_ICAL_LINK = '#page #main #sidebar-right .addtocal_menu a'
-
-    def getEventList(self):
-        url = utils.normalizeURL(base=self.DOMAIN, url=self.URL)
-        return utils.getLinksAtURL(self.requester,
-                                   url,
-                                   self.SELECTOR_EVENT_LINK,
-                                   elemFilter=lambda e: e.text)
-
-    def _getEventDetails(self, eventURL):
-        details = self.requester.fetchURL(eventURL)
-        if not details:
-            return None
-
-        soup = BeautifulSoup(details, 'html.parser')
-
-        def _isIcalLink(elem):
-            return elem.text.lower() == 'icalendar'
-
-        exportLinks = soup.select(self.SELECTOR_EVENT_ICAL_LINK)
-        icalLinks = utils.Soup.getLinksAt(soup,
-                                          self.SELECTOR_EVENT_ICAL_LINK,
-                                          elemFilter=_isIcalLink)
-        if len(icalLinks) > 1:
-            logger.warning(f'Found more than one iCAL links for {eventURL}. Only using first one!')
-        icalLink = utils.firstOrNone(icalLinks)
-        if not icalLink:
-            logger.error(f'No iCAL link found at {eventURL}')
-            return None
-
-        icalLink = utils.normalizeURL(base=eventURL, url=icalLink)
-        if not icalLink:
-            return None
-
-        icalEvents = self.requester.fetchICalEvents(icalLink)
-        if len(icalEvents) > 1:
-            logger.warning(f'More than one event defined in {icalLink}. Only using first one!')
-        icalEvent = utils.firstOrNone(icalEvents)
-        if not icalEvent:
-            logger.error(f'No iCAL events in {icalLink} for {eventURL}')
-            return None
-
-        event = RawEvent(self.IDENTIFIER, eventURL)
-        event.setTitle(utils.cleanTextFromIcal(icalEvent['SUMMARY']))
-
-        startTime = icalEvent['DTSTART'].dt if 'DTSTART' in icalEvent else None
-        if not startTime:
-            logger.error('Event has no start time')
-            return None
-        event.setStart(utils.normalizeDate(startTime, self.config.timezone))
-        endTime = icalEvent['DTEND'].dt if 'DTEND' in icalEvent else None
-        event.setEnd(utils.normalizeDate(endTime, self.config.timezone))
-
-        event.setLocation(utils.cleanTextFromIcal(icalEvent.get('LOCATION', '')))
-        description, links = utils.Soup.tokenizeElemAt(soup,
-                                                       self.SELECTOR_EVENT_DESCRIPTION,
-                                                       base=eventURL)
-        newLinks = utils.Soup.getLinksAt(soup, self.SELECTOR_EVENT_LINKS)
-        links|= set(filter(None, map(utils.normalizeURL(base=eventURL), newLinks)))
-        event.setDescription(description)
-        event.setLinks(links)
-
-        return event
-
-
 class ChemistryGatechEduCrawler(RemoteListCrawler):
     IDENTIFIER = 'chemistry.gatech.edu'
-    DOMAIN = 'http://chemistry.gatech.edu'
+    DOMAIN = 'https://www.chemistry.gatech.edu'
     URL = '/events/all'
 
     SELECTOR_EVENTS = '#page #main #content .view-all-events .view-content tbody tr'
@@ -1147,7 +1001,7 @@ class ChemistryGatechEduCrawler(RemoteListCrawler):
                     parsed = urlparse(link)
                 except ValueError:
                     return False
-                return (parsed.netloc == 'chemistry.gatech.edu' and
+                return (parsed.netloc == 'www.chemistry.gatech.edu' and
                         parsed.path.startswith(self.LINK_PREFIX_INCLUDE))
 
             links = elem.select(self.SELECTOR_EVENT_LINK)
@@ -1443,9 +1297,7 @@ def main(token, args):
     crawler.registerCalendarCrawler(MercuryBackendCrawler)
     crawler.registerCalendarCrawler(CareerGatechEduCrawler)
     crawler.registerCalendarCrawler(CampuslabsComCrawler)
-    crawler.registerCalendarCrawler(CcGatechEduCrawler)
     crawler.registerCalendarCrawler(ChemistryGatechEduCrawler)
-    crawler.registerCalendarCrawler(BmeGatechEduCrawler)
     crawler.discover()
     crawler.resolve()
 
