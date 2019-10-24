@@ -830,7 +830,7 @@ class MercuryBackendCrawler(RemoteListCrawler):
 
         # need to fetch human readable site because XML does not contain status
         status = None
-        details2 = self.requester.fetchURL(eventURL)
+        details2 = self.requester.fetchURL(eventURL, errorOnCode=(403,))
         soup2 = BeautifulSoup(details2 or '', 'lxml')
         if details2:
             # HTML tree is broken sometimes, which will confuse the python parser

@@ -585,13 +585,17 @@ class Requester:
                  method='GET',
                  data=None,
                  retries=None,
-                 json=False):
+                 json=False,
+                 errorOnCode=None):
         if base:
             url = normalizeURL(base=base, url=url)
 
+        errorCodes = set((404,))
+        if errorOnCode:
+            errorCodes|= set(errorOnCode)
         self._throttle(url)
 
-        for n in range(self.retries if retries is None else retries):
+        for n in range((self.retries if retries is None else retries) or 1):
             try:
                 # TODO: use urllib3's Retry
                 response = self.session.request(method,
@@ -604,8 +608,11 @@ class Requester:
                 continue
 
             if response.status_code != 200:
+                if response.status_code in errorCodes:
+                    return None
                 if not (500 <= response.status_code < 600):
-                    logger.error(f'{url}: status code {response.status_code} (attempt {n})\n{response.headers}\n{response.text:1000}')
+                    resShort = response.text.replace('\n', '')[:1000]
+                    logger.error(f'{url}: status code {response.status_code} (attempt {n})\n{response.headers}\n{resShort}')
                 continue
 
             if n:
