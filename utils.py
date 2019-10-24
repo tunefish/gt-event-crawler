@@ -8,7 +8,7 @@ import re
 from datetime import datetime, time, date
 from time import monotonic as time_monotonic
 from time import sleep as time_sleep
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urlunparse, urljoin
 
 import icalendar
 import pytz
@@ -98,27 +98,57 @@ def parseIsoDateOrDatetime(iso):
         return None
 
 
+_DOMAIN_REGEX = re.compile(r'([\w\d]([\w\d-]{0,61}[\w\d])?\.)+[\w\d]+')
 def normalizeURL(base=None, url=None):
     def _normalize(url):
+        if isEmail(url):
+            try:
+                parsed = urlparse(url)
+            except ValueError:
+                return url
+            return parsed.path.strip().lower()
+
+        # Some URLs are missing the scheme and would be normalized to a URL pointing
+        # somewhere on the crawled calendar's domain
+        #  -> if the part of a URL before the first forward slash looks like a
+        #     domain name, add 'http' as scheme
         try:
             parsed = urlparse(url)
         except ValueError:
             return None
-        if parsed.scheme == 'mailto':
-            return parsed.path.strip()
+        scheme, netloc, path, *_ = parsed
+        if not scheme:
+            if not netloc:
+                firstPathElem, *pathRest = path.split('/', 1)
+                if (0 < len(firstPathElem) <= 253
+                    and _DOMAIN_REGEX.fullmatch(firstPathElem)):
+                    scheme = 'http'
+                    netloc = firstPathElem
+                    path = (pathRest or ('',))[0]
+            else:
+                scheme = 'http'
+        # remove unneccessary characters (eg bogus '#') and use lowercase scheme + netloc
+        url = urlunparse((scheme.lower(),
+                          netloc.lower(),
+                          path,
+                          *parsed[3:]))
         return urljoin(base, url)
     if url is None:
         return _normalize
     return _normalize(url)
 
 
+_EMAIL_REGEX = re.compile(r'[^\s:;/@]+@[^\s:;/@]+\.[^\s:;/@]+')
 def isEmail(link):
     if not link:
         return False
     try:
-        return urlparse(link).scheme == 'mailto'
+        if urlparse(link).scheme == 'mailto':
+            return True
     except ValueError:
-        return False
+        pass
+
+    return bool(_EMAIL_REGEX.fullmatch(link))
 
 
 def strfURL(urlFmt, year=None, month=None, week=None, day=None, page=0):
@@ -165,6 +195,9 @@ def sortStringList(strList):
 
 
 def mergeStringLists(mainList, mergeList):
+    if not mainList or not mergeList:
+        return mainList or mergeList
+
     entries = list(filter(None, map(str.strip, mainList.split(','))))
     entriesLower = list(map(str.lower, entries))
     for entry in filter(None, map(str.strip, mergeList.split(','))):
@@ -266,6 +299,27 @@ class HTMLToText:
         __slots__ = ('link',)
         def __init__(self, link):
             self.link = link
+
+        def __eq__(self, other):
+            if not isinstance(other, HTMLToText.ReplaceLink):
+                return False
+
+            # URLs must be identical but http/https links are considered the same
+            selfParsed = urlparse(self.link)
+            otherParsed = urlparse(other.link)
+            if selfParsed[1:] != otherParsed[1:]:
+                return True
+
+            return (selfParsed.scheme == otherParsed.scheme
+                    or (selfParsed.scheme in ('http', 'https')
+                        and otherParsed.scheme in ('http', 'https')))
+
+        def __hash__(self):
+            if (self.link.startswith('http://')
+                or self.link.startswith('https://')):
+                # don't differentiate between http/https for sake of comparing links
+                return hash('http://' + self.link.split('://', 2)[1])
+            return hash(self.link)
 
         def __str__(self):
             return f'Link to {self.link}'
@@ -382,9 +436,9 @@ class HTMLToText:
                     if not HTMLToText._textMatchesLink(child, nestedTkns, base=base):
                         tokens.extend(nestedTkns)
 
-                    link = Soup.getElemLink(child)
-                    tokens.append(HTMLToText.ReplaceLink(link))
-                    links.add(link)
+                    normLink = normalizeURL(base=base, url=Soup.getElemLink(child))
+                    tokens.append(HTMLToText.ReplaceLink(normLink))
+                    links.add(normLink)
                 else:
                     # preformatting
                     if customStyle['FORMAT_PREPEND'].get(tag, None) is not None:
@@ -435,13 +489,14 @@ class HTMLToText:
     @staticmethod
     def renderTokens(tokens, links, specialLinks=None):
         # Step 0: Init link map and determine required number of digits
-        linkMap = {l: -1 for l in links}
+        linkMap = {HTMLToText.ReplaceLink(l): -1 for l in links}
+        for l in tokens:
+            if isinstance(l, HTMLToText.ReplaceLink):
+                linkMap[l] = -1
         for n, link in enumerate(specialLinks or ()):
-            linkMap[link] = n
-        counter = len(specialLinks or ()) or 1
+            linkMap[HTMLToText.ReplaceLink(link)] = n
 
-        linkMap.update({l.link: -1
-                       for l in tokens if isinstance(l, HTMLToText.ReplaceLink)})
+        counter = len(specialLinks or ()) or 1
         digits = intLen(len(linkMap))
 
         # Step 1a: insert \n at WeakLinebreak tokens where necessary and replace
@@ -461,12 +516,12 @@ class HTMLToText:
                     and not fragments[-1].endswith('\n')):
                     fragments.append(HTMLToText.WeakLinebreak)
             elif isinstance(d, HTMLToText.ReplaceLink):
-                if linkMap[d.link] == -1:
-                    linkMap[d.link] = counter
+                if linkMap[d] == -1:
+                    linkMap[d] = counter
                     counter+= 1
                 if fragments[-1] is HTMLToText.WeakLinebreak:
                     fragments.pop()
-                fragments.append(f'[{linkMap[d.link]:0{digits}}]')
+                fragments.append(f'[{linkMap[d]:0{digits}}]')
 
         if fragments[-1] is HTMLToText.WeakLinebreak:
             fragments.pop()
@@ -480,14 +535,16 @@ class HTMLToText:
         renderedText = re.sub(r'\n{3,}', '\n\n', fragments)
 
         # Step 2a: assign IDs to links not referenced by a ReplaceLink token
-        unassignedLinks = filter(lambda l: l[1] == -1, linkMap.items())
-        for link, ctr in sorted(unassignedLinks, key=operator.itemgetter(0)):
-            linkMap[link] = counter
-            counter+= 1
+        unassigned = filter(lambda l: l[1] == -1, linkMap.items())
+        sorter = lambda link: (isEmail(link[0].link), link[0].link)
+        unassigned = sorted(unassigned, key=sorter)
+        for ctr, (link, _) in enumerate(unassigned, start=counter):
+            linkMap[link] = ctr
 
         # Step 2b: render links section
         sortedLinks = sorted(linkMap.items(), key=operator.itemgetter(1))
-        linkDescription = (f'[{i:0{digits}}]  {link}' for link, i in sortedLinks)
+        linkDescription = (f'[{i:0{digits}}]  {link.link}'
+                           for link, i in sortedLinks)
         renderedLinks = '\n'.join(linkDescription)
 
         return renderedText, renderedLinks

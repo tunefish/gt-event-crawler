@@ -1081,8 +1081,9 @@ class ChemistryGatechEduCrawler(RemoteListCrawler):
         description, links = utils.Soup.tokenizeElemAt(soup,
                                                        self.SELECTOR_EVENT_DESCRIPTION,
                                                        base=eventURL)
-        newLinks = utils.Soup.getLinksAt(soup, self.SELECTOR_EVENT_LINKS)
-        links|= set(filter(None, map(utils.normalizeURL(base=eventURL), newLinks)))
+        links|= frozenset(utils.Soup.getLinksAt(soup, self.SELECTOR_EVENT_LINKS))
+        links = map(utils.normalizeURL(base=eventURL), links)
+        links = frozenset(filter(None, links))
         event.setDescription(description)
         event.setLinks(links)
 
@@ -1168,6 +1169,9 @@ class CareerGatechEduCrawler(RemoteListCrawler):
         description, links = utils.Soup.tokenizeElemAt(event,
                                                        self.SELECTOR_EVENT_DESCRIPTION,
                                                        base=url)
+        links = map(utils.normalizeURL(base=self.URL), links)
+        links = frozenset(filter(None, links))
+
         rawEvent.setDescription(description)
         rawEvent.setLinks(links)
 
@@ -1209,11 +1213,6 @@ class CampuslabsComCrawler(RemoteListCrawler):
 
         events = set()
         for event in res['value']:
-            if (event['status'] or '').lower() not in self.config.statusCodes:
-                logger.warning(f'Event {eventURL} has unknown status "{event["status"]}"!')
-            elif not self.config.statusCodes.get(event['status'].lower(), 25):
-                continue
-
             eventURL = utils.normalizeURL(base=self.DOMAIN, url=self.EVENT_URL)
             eventURL = eventURL.format(event['id'])
 
@@ -1230,12 +1229,16 @@ class CampuslabsComCrawler(RemoteListCrawler):
                 endTime = utils.normalizeDate(endTime, self.config.timezone)
                 rawEvent.setEnd(endTime)
 
+            rawEvent.setLocation(event['location'])
             rawEvent.setExtras(', '.join(event.get('benefitNames', ())))
 
             soup = BeautifulSoup(event['description'], 'html.parser')
             description, links = utils.HTMLToText.tokenizeSoup(soup,
                                                                base=url,
                                                                customStyle=self.DESCRIPTION_STYLE)
+            links = map(utils.normalizeURL(base=eventURL), links)
+            links = frozenset(filter(None, links))
+
             rawEvent.setDescription(description)
             rawEvent.setLinks(links)
 
