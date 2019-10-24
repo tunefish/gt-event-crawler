@@ -64,6 +64,15 @@ def getDate(d):
         return None
 
 
+def getDatetime(d):
+    if isinstance(d, datetime):
+        return d
+    elif isinstance(d, date):
+        return datetime(*d.timetuple()[:6])
+    else:
+        return None
+
+
 def addMonths(d, months):
     month = d.month - 1 + months
     year = d.year + month // 12
@@ -386,6 +395,36 @@ class HTMLToText:
                         tokens.append(HTMLToText.ELEM_FORMAT_APPEND[tag])
 
         return tuple(filter(None, tokens)), frozenset(links)
+
+    @staticmethod
+    def stringifyTokens(tokens):
+        def _stringify(tkn):
+            if isinstance(tkn, str):
+                if tkn.startswith('\\'):
+                    return f'/{tkn}'
+                else:
+                    return tkn
+            elif tkn is HTMLToText.WeakLinebreak:
+                return '\\wn'
+            elif isinstance(tkn, HTMLToText.ReplaceLink):
+                return f'\\l{tkn.link}'
+
+        return tuple(map(_stringify, tokens))
+
+    @staticmethod
+    def unstringifyTokens(stringifiedTokens):
+        def _unstringify(tkn):
+            if tkn.startswith('\\wn'):
+                return HTMLToText.WeakLinebreak
+            elif tkn.startswith('\\l'):
+                return HTMLToText.ReplaceLink(tkn[2:])
+
+            if tkn.startswith('\\'):
+                return tkn[1:]
+            else:
+                return tkn
+
+        return tuple(map(_unstringify, stringifiedTokens))
 
     @staticmethod
     def renderTokens(tokens, links, specialLinks=None):
