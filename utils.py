@@ -231,8 +231,14 @@ class Soup:
         return elem.attrs.get('href', None)
 
     @staticmethod
-    def getTextAt(elem, selector):
-        return Soup.getElemText(firstOrNone(elem.select(selector)))
+    def getTextAt(elem, selector, **kwargs):
+        return Soup.getElemText(firstOrNone(elem.select(selector)), **kwargs)
+
+    @staticmethod
+    def getTextsAt(elem, selector, elemFilter=None):
+        elemFilter = elemFilter or Soup.filters.textElemFilter
+        elems = filter(elemFilter, elem.select(selector))
+        return tuple(filter(None, map(Soup.getElemText, elems)))
 
     @staticmethod
     def getChildrenTexts(elem, elemFilter=None):

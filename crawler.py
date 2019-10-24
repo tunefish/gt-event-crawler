@@ -664,6 +664,12 @@ class MercuryBackendCrawler(RemoteListCrawler):
     DOMAIN = 'http://hg.gatech.edu'
     URL = '/views/ajax'
 
+    # lists all entries updated since a given unix timestamp
+    UPDATED_URL = '/uptracker/json/{}'
+
+    # url to resolve an event given its ID
+    EVENT_URL = '/node/{}'
+
     # extracted from ajax calls
     LIST_REQUEST_DATA = {
         'type_1': 'event',
@@ -708,13 +714,17 @@ class MercuryBackendCrawler(RemoteListCrawler):
     SELECTOR_EVENT_POSTED = 'td.views-field.views-field-created'
     SELECTOR_NEXT_PAGE = '.view .item-list .pager-next'
 
-    SELECTOR_EVENT_TITLE = '#meat #content #page-title'
-    SELECTOR_EVENT_TIMES = '#meat #content .content .eventWrapper .detailsSidebar .allTimesList li'
-    SELECTOR_EVENT_DETAILS = '#meat #content .content .eventWrapper .detailsSidebar'
-    SELECTOR_EVENT_DESCRIPTION = '#meat #content .content .eventWrapper'
-    SELECTOR_EVENT_DESCRIPTION_EXCLUDE = ('detailsSidebar', 'metaDataTitle', 'metaDataList', 'relatedLinksTitle', 'relatedLinksList')
-    SELECTOR_EVENT_LINKS = '#meat #content .content .eventWrapper .relatedLinksList a'
-    SELECTOR_EVENT_METADATA = '#meat #content .content .eventWrapper .metaDataList'
+    SELECTOR_TYPE = 'type'
+    SELECTOR_EVENT_TITLE = 'title'
+    SELECTOR_EVENT_DESCRIPTION = 'body'
+    SELECTOR_EVENT_AUDIENCE = 'field_audience item value'
+    SELECTOR_EVENT_EXTRAS = 'field_extras item value'
+    SELECTOR_EVENT_LINKS = 'links_related item url'
+    SELECTOR_EVENT_LOCATION = 'field_location item value'
+    SELECTOR_EVENT_URLS = 'field_url item url'
+
+    SELECTOR_EVENT_HTMLTIMES = '#meat #content .content .eventWrapper .detailsSidebar .allTimesList li'
+    SELECTOR_EVENT_HTMLMETADATA = '#meat #content .content .eventWrapper .metaDataList'
 
     FORMAT_POSTED = '%a, %b %d, %Y - %I:%M%p'
     FORMAT_EVENT_DATE = '%A %B %d, %Y'
@@ -758,82 +768,91 @@ class MercuryBackendCrawler(RemoteListCrawler):
                         lastPosted = min(lastPosted, postedTime)
                     except ValueError:
                         logger.warning('Unable to parse posted time {posted}')
+                        lastPosted+= timedelta(days=1)
 
             if not soup.select(self.SELECTOR_NEXT_PAGE):
                 break
 
             page+= 1
 
+        updatesSince = datetime.now() - self.config.mercurySearchBacklog
+        requestTimestamp = int(updatesSince.timestamp())
+        url = self.UPDATED_URL.format(requestTimestamp)
+        url = utils.normalizeURL(base=self.DOMAIN, url=url)
+        updatedEventList = self.requester.fetchURL(url, json=True)
+
+        if updatedEventList:
+            for eventId in updatedEventList:
+                url = self.EVENT_URL.format(eventId)
+                events.add(utils.normalizeURL(base=self.DOMAIN, url=url))
+        else:
+            logger.warning('Cannot fetch recently updated events!')
+
         return events
 
     def _getEventDetails(self, eventURL):
-        details = self.requester.fetchURL(eventURL)
+        details = self.requester.fetchURL(f'{eventURL}/xml', errorOnCode=(403,))
         if not details:
             return None
 
-        def _descriptionFilter(elem):
-            if not utils.Soup.filters.textElemFilter(elem):
-                return False
-            if isinstance(elem, str):
-                return True
-            classes = elem.attrs.get('class', ())
-            return not any(cls in classes
-                           for cls in self.SELECTOR_EVENT_DESCRIPTION_EXCLUDE)
-
-        # HTML tree is broken sometimes, which will confuse the native python parser
-        soup = BeautifulSoup(details, 'lxml')
+        soup = BeautifulSoup(details, 'xml')
+        if utils.Soup.getTextAt(soup, self.SELECTOR_TYPE) != 'event':
+            return set()
         title = utils.Soup.getTextAt(soup, self.SELECTOR_EVENT_TITLE)
-        description, links = utils.Soup.tokenizeElemAt(soup,
-                                                       self.SELECTOR_EVENT_DESCRIPTION,
-                                                       elemFilter=_descriptionFilter,
-                                                       base=eventURL)
+        location = utils.Soup.getTextAt(soup, self.SELECTOR_EVENT_LOCATION)
 
-        times = soup.select(self.SELECTOR_EVENT_TIMES)
-        if not times:
-            return None
+        description = utils.Soup.getTextAt(soup, self.SELECTOR_EVENT_DESCRIPTION)
+        links = frozenset()
+        if description:
+            descSoup = BeautifulSoup(description, 'html.parser')
+            description, links = utils.HTMLToText.tokenizeSoup(descSoup,
+                                                               base=eventURL)
 
-        details = self._getBlockFromList(soup,
-                                         self.SELECTOR_EVENT_DETAILS,
-                                         'event details')
-        if not details:
-            logger.error('No event details found for {eventURL}')
-            return None
+        relatedLinks = utils.Soup.getTextsAt(soup, self.SELECTOR_EVENT_LINKS)
+        if relatedLinks:
+            links|= frozenset(relatedLinks)
 
-        extras = self._getBlockDetailText(details, 'extras')
-        location = self._getBlockDetailText(details, 'location')
-        additionalURLs = self._getBlockDetail(details, 'url', onlyNextElem=False)
-        if additionalURLs:
-            links|= utils.Soup.getLinksAt(additionalURLs, 'a')
-        newLinks = utils.Soup.getLinksAt(soup, self.SELECTOR_EVENT_LINKS)
-        links|= set(filter(None, map(utils.normalizeURL(base=eventURL), newLinks)))
+        urls = utils.Soup.getTextsAt(soup, self.SELECTOR_EVENT_URLS)
+        if urls:
+            links|= frozenset(urls)
+        links = map(utils.normalizeURL(base=eventURL), links)
+        links = frozenset(filter(None, links))
 
-        audienceBlock = self._getBlockFromList(soup,
-                                               self.SELECTOR_EVENT_METADATA,
-                                               'invited audience')
-        if not audienceBlock:
-            logger.warning(f'Invalid HTML at {eventURL}')
-        audience = utils.Soup.getElemText(audienceBlock)
+        audience = utils.Soup.getTextsAt(soup, self.SELECTOR_EVENT_AUDIENCE)
+        if audience:
+            audience = ', '.join(audience)
 
-        statusBlock = self._getBlockFromList(soup,
-                                             self.SELECTOR_EVENT_METADATA,
-                                             'status')
-        if not statusBlock:
-            logger.warning(f'Invalid HTML at {eventURL}')
-            status = None
-        else:
-            status = self._getBlockDetailText(statusBlock, 'workflow status')
-            status = status.lower()
-            if status is not None and status not in self.config.statusCodes:
-                logger.warning(f'Event {eventURL} has unknown status "{status}"!')
+        extras = utils.Soup.getTextsAt(soup, self.SELECTOR_EVENT_EXTRAS)
+        if extras:
+            def _cleanExtra(xtr):
+                return xtr.replace('_', ' ').capitalize()
+            extras = ', '.join(map(_cleanExtra, extras))
 
-        if not self.config.statusCodes.get(status.lower(), 25):
-            logger.info(f'Skipping {eventURL}: status {status}')
-            return None
+        # need to fetch human readable site because XML does not contain status
+        status = None
+        details2 = self.requester.fetchURL(eventURL)
+        soup2 = BeautifulSoup(details2 or '', 'lxml')
+        if details2:
+            # HTML tree is broken sometimes, which will confuse the python parser
+            statusBlock = self._getBlockFromList(soup2,
+                                                 self.SELECTOR_EVENT_HTMLMETADATA,
+                                                 'status')
+
+            if statusBlock:
+                statusElem = self._getBlockDetail(statusBlock, 'workflow status')
+                status = utils.Soup.getElemText(statusElem)
+                status = status.lower()
+
+        # parse dates from HTML, because timezones and recurring events are
+        # entirely messed up in the XML (some rrules are really weird and in no
+        # way generate the event instances listed in HTML, eg http://hg.gatech.edu/node/623952)
+        htmlTimes = soup2.select(self.SELECTOR_EVENT_HTMLTIMES)
 
         events = set()
-        for n, timeEntry in enumerate(times):
-            startTime, endTime = self._parseEventTime(timeEntry)
+        for n, timeEntry in enumerate(htmlTimes):
+            startTime, endTime = self._parseHTMLEventTime(timeEntry)
             if not startTime:
+                logger.error(f'Cannot parse event time for {eventURL}: {utils.Soup.getElemText(timeEntry)}')
                 continue
 
             rawEvent = RawEvent(self.IDENTIFIER,
@@ -841,16 +860,20 @@ class MercuryBackendCrawler(RemoteListCrawler):
                                 title,
                                 startTime)
             rawEvent.setEnd(endTime)
-            rawEvent.setExtras(extras)
-            rawEvent.setLocation(location)
             rawEvent.setDescription(description)
             rawEvent.setLinks(links)
-            rawEvent.setAudience(audience)
-            rawEvent.setStatus(status)
+            if location:
+                rawEvent.setLocation(location)
+            if audience:
+                rawEvent.setAudience(audience)
+            if extras:
+                rawEvent.setExtras(extras)
+            if status:
+                rawEvent.setStatus(status)
             events.add(rawEvent)
         return events
 
-    def _parseEventTime(self, timeEntry):
+    def _parseHTMLEventTime(self, timeEntry):
         strings = utils.Soup.getChildrenTexts(timeEntry)
         startTime, endTime = None, None
         if len(strings) == 2:
@@ -934,7 +957,7 @@ class MercuryBackendCrawler(RemoteListCrawler):
     def _getBlockFromList(self, soup, selector, blockName):
         elems = utils.firstOrNone(soup.select(selector))
         if not elems:
-            print('No blocklist', selector)
+            logger.warning(f'No blocklist {selector}')
             return None
 
         def _isBlock(elem):
@@ -942,13 +965,10 @@ class MercuryBackendCrawler(RemoteListCrawler):
 
         detailsLabel = elems.findChild(_isBlock)
         if not detailsLabel:
-            print('No label', blockName)
+            logger.warning(f'No label {blockName}')
             return None
 
         return detailsLabel.findNextSibling()
-
-    def _getBlockDetailText(self, detailSoup, detail):
-        return utils.Soup.getElemText(self._getBlockDetail(detailSoup, detail))
 
     def _getBlockDetail(self, detailSoup, detail, onlyNextElem=True):
         def _isDetailLabel(elem):
