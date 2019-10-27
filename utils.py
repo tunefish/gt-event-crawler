@@ -39,6 +39,10 @@ def firstOrNone(l):
     return next(iter(l), None) if l else None
 
 
+def itemsFromMapping(mapping):
+    return mapping.items() if hasattr(mapping, 'items') else mapping
+
+
 def intLen(i):
     # number of digits in a number (without sign)
     if i == 0:
@@ -99,7 +103,7 @@ def parseIsoDateOrDatetime(iso):
 
 
 _DOMAIN_REGEX = re.compile(r'([\w\d]([\w\d-]{0,61}[\w\d])?\.)+[\w\d]+')
-def normalizeURL(base=None, url=None):
+def normalizeURL(base=None, url=None, fixNetloc=True):
     def _normalize(url):
         if isEmail(url):
             try:
@@ -118,7 +122,7 @@ def normalizeURL(base=None, url=None):
             return None
         scheme, netloc, path, *_ = parsed
         if not scheme:
-            if not netloc:
+            if not netloc and fixNetloc:
                 firstPathElem, *pathRest = path.split('/', 1)
                 if (0 < len(firstPathElem) <= 253
                     and _DOMAIN_REGEX.fullmatch(firstPathElem)):
@@ -292,6 +296,157 @@ class Soup:
         return cleanText(elem.text)
 
 
+class NormalizedURLContainer:
+    _fix_netloc = False
+    # A container superclass which normalizes URLs and prefers their HTTPS 
+    # All subclasses must list this class BEFORE the container type they are extending
+    def __contains__(self, key):
+        normKey = self._normalizeURL(key)
+        if super().__contains__(normKey):
+            return True
+        parsed = urlparse(normKey)
+        if parsed.scheme == 'https':
+            httpURL = urlunparse(('http', *parsed[1:]))
+            return super().__contains__(httpURL)
+        return False
+
+    def _normalizeURL(self, url):
+        url = normalizeURL(url=url, fixNetloc=self._fix_netloc)
+        parsed = urlparse(url)
+        if parsed.scheme == 'http':
+            httpsURL = urlunparse(('https', *parsed[1:]))
+            if super().__contains__(httpsURL):
+                return httpsURL
+        return url
+
+
+class NormalizedURLSet(NormalizedURLContainer, set):
+    def __init__(self, *args, fixNetloc=True):
+        args = ((map(self._normalizeURL, arg)) for arg in args)
+        self._fix_netloc = fixNetloc
+        super(NormalizedURLSet, self).__init__(*args)
+
+    def add(self, url):
+        normURL = self._normalizeURL(url)
+        super().add(normURL)
+        parsed = urlparse(normURL)
+        if parsed.scheme == 'http':
+            httpURL = urlunparse(('http', *parsed[1:]))
+            if set.__contains__(self, httpURL):
+                super().__delitem__(httpURL)
+
+    def isdisjoint(self, other):
+        return not any(url in self for url in other)
+
+    def issubset(self, other):
+        return self.__le__(other)
+
+    def __le__(self, other):
+        return all(url in other for url in self)
+
+    def __lt__(self, other):
+        return self.__le__(other) and self != other
+
+    def issuperset(self, other):
+        return self.__ge__(other)
+
+    def __ge__(self, other):
+        return all(url in self for url in other)
+
+    def __gt__(self, other):
+        return self.__ge__(other) and self != other
+
+    def union(self, *others):
+        return type(self)(super().union(*others))
+
+    def __or__(self, other):
+        return self.union(other)
+
+    def intersection(self, *others):
+        return type(self)(super().intersection(*others))
+
+    def __and__(self, other):
+        return self.intersection(other)
+
+    def difference(self, *others):
+        return type(self)(super().difference(*others))
+
+    def __sub__(self, other):
+        return self.difference(other)
+
+    def symmetric_difference(self, other):
+        return type(self)(super().__xor__(other))
+
+    def __xor__(self, other):
+        return self.symmetric_difference(other)
+
+    def copy(self):
+        return type(self)(super().copy())
+
+    def update(self, *others):
+        for other in others:
+            for url in other:
+                self.add(url)
+
+    def remove(self, url):
+        super().remove(self._normalizeURL(url))
+
+    def discard(self, url):
+        super().discard(self._normalizeURL(url))
+
+
+class NormalizedURLDict(NormalizedURLContainer, dict):
+    def __init__(self, *args, fixNetloc=True, **kwargs):
+        args = (((self._normalizeURL(key), value)
+                 for key, value in itemsFromMapping(arg))
+                for arg in args)
+        kwargs = {self._normalizeURL(key): value for key, value in kwargs}
+        self._fix_netloc = fixNetloc
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        normKey = self._normalizeURL(key)
+        super().__setitem__(normKey, value)
+        parsed = urlparse(normKey)
+        if parsed.scheme == 'https':
+            httpURL = urlunparse(('http', *parsed[1:]))
+            if dict.__contains__(self, httpURL):
+                super(NormalizedURLDict, self).__delitem__(httpURL)
+
+    def __getitem__(self, key):
+        return super().__getitem__(self._normalizeURL(key))
+
+    def __delitem__(self, key):
+        super().__delitem__(self._normalizeURL(key))
+
+    def get(self, key, default=None):
+        return super().get(self._normalizeURL(key), default)
+
+    def setdefault(self, key, value=None):
+        return super().setdefault(self._normalizeURL(key), value)
+
+    def pop(self, key, default=None):
+        return super().pop(self._normalizeURL(key), default)
+
+    def popitem(self):
+        return super().popitem()
+
+    def has_key(self, key):
+        return dict.__contains__(self, self._normalizeURL(key))
+
+    def update(self, *args, **kwargs):
+        mappings = list(args) + [kwargs]
+        for mapping in mappings:
+            for key, value in itemsFromMapping(mapping):
+                self[key] = value
+
+    def copy(self):
+        return type(self)(super().copy())
+
+    def __repr__(self):
+        return '%s(%s)' % (type(self).__name__, dict(self))
+
+
 class HTMLToText:
     # A placeholder for a link that will be replaced with a reference to the
     # corresponding entry in the link section during rendering.
@@ -301,25 +456,8 @@ class HTMLToText:
             self.link = link
 
         def __eq__(self, other):
-            if not isinstance(other, HTMLToText.ReplaceLink):
-                return False
-
-            # URLs must be identical but http/https links are considered the same
-            selfParsed = urlparse(self.link)
-            otherParsed = urlparse(other.link)
-            if selfParsed[1:] != otherParsed[1:]:
-                return True
-
-            return (selfParsed.scheme == otherParsed.scheme
-                    or (selfParsed.scheme in ('http', 'https')
-                        and otherParsed.scheme in ('http', 'https')))
-
-        def __hash__(self):
-            if (self.link.startswith('http://')
-                or self.link.startswith('https://')):
-                # don't differentiate between http/https for sake of comparing links
-                return hash('http://' + self.link.split('://', 2)[1])
-            return hash(self.link)
+            return (isinstance(other, HTMLToText.ReplaceLink)
+                    and other.link == self.link)
 
         def __str__(self):
             return f'Link to {self.link}'
@@ -489,39 +627,39 @@ class HTMLToText:
     @staticmethod
     def renderTokens(tokens, links, specialLinks=None):
         # Step 0: Init link map and determine required number of digits
-        linkMap = {HTMLToText.ReplaceLink(l): -1 for l in links}
-        for l in tokens:
-            if isinstance(l, HTMLToText.ReplaceLink):
-                linkMap[l] = -1
+        linkMap = NormalizedURLDict({link: -1 for link in links})
+        for tkn in tokens:
+            if isinstance(tkn, HTMLToText.ReplaceLink):
+                linkMap[tkn.link] = -1
         for n, link in enumerate(specialLinks or ()):
-            linkMap[HTMLToText.ReplaceLink(link)] = n
+            linkMap[link] = n
 
-        counter = len(specialLinks or ()) or 1
+        counter = len(specialLinks) if specialLinks else 1
         digits = intLen(len(linkMap))
 
         # Step 1a: insert \n at WeakLinebreak tokens where necessary and replace
         #          ReplaceLink tokens with a referene to the link
         fragments = ['']
-        for d in tokens:
-            if isinstance(d, str):
+        for tkn in tokens:
+            if isinstance(tkn, str):
                 if fragments[-1] is HTMLToText.WeakLinebreak:
                     fragments.pop()
-                    if not d.startswith('\n'):
-                        fragments.append(f'\n{d}')
+                    if not tkn.startswith('\n'):
+                        fragments.append(f'\n{tkn}')
                         continue
-                fragments.append(d)
-            elif d is HTMLToText.WeakLinebreak:
+                fragments.append(tkn)
+            elif tkn is HTMLToText.WeakLinebreak:
                 # Ignore double WeakLinebreaks
                 if (fragments[-1] is not HTMLToText.WeakLinebreak
                     and not fragments[-1].endswith('\n')):
                     fragments.append(HTMLToText.WeakLinebreak)
-            elif isinstance(d, HTMLToText.ReplaceLink):
-                if linkMap[d] == -1:
-                    linkMap[d] = counter
+            elif isinstance(tkn, HTMLToText.ReplaceLink):
+                if linkMap[tkn.link] == -1:
+                    linkMap[tkn.link] = counter
                     counter+= 1
                 if fragments[-1] is HTMLToText.WeakLinebreak:
                     fragments.pop()
-                fragments.append(f'[{linkMap[d]:0{digits}}]')
+                fragments.append(f'[{linkMap[tkn.link]:0{digits}}]')
 
         if fragments[-1] is HTMLToText.WeakLinebreak:
             fragments.pop()
@@ -536,14 +674,14 @@ class HTMLToText:
 
         # Step 2a: assign IDs to links not referenced by a ReplaceLink token
         unassigned = filter(lambda l: l[1] == -1, linkMap.items())
-        sorter = lambda link: (isEmail(link[0].link), link[0].link)
+        sorter = lambda link: (isEmail(link[0]), link[0])
         unassigned = sorted(unassigned, key=sorter)
         for ctr, (link, _) in enumerate(unassigned, start=counter):
             linkMap[link] = ctr
 
         # Step 2b: render links section
         sortedLinks = sorted(linkMap.items(), key=operator.itemgetter(1))
-        linkDescription = (f'[{i:0{digits}}]  {link.link}'
+        linkDescription = (f'[{i:0{digits}}]  {link}'
                            for link, i in sortedLinks)
         renderedLinks = '\n'.join(linkDescription)
 

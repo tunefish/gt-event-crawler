@@ -102,12 +102,12 @@ class RawEvent:
         self.location = location
         self.extras = extras
         self.description = description or ()
-        self.links = links or frozenset()
+        self.links = links or utils.NormalizedURLSet()
         self.audience = audience
         self.status = status
 
     def setAlternativeUrls(self, urls):
-        self.alternativeUrls = urls
+        self.alternativeUrls = utils.NormalizedURLSet(urls)
 
     def setTitle(self, title):
         if not title:
@@ -132,7 +132,7 @@ class RawEvent:
         self.description = description
 
     def setLinks(self, links):
-        self.links = links
+        self.links = utils.NormalizedURLSet(links)
 
     def setAudience(self, audience):
         self.audience = utils.sortStringList(audience)
@@ -163,9 +163,9 @@ class RawEvent:
         return description
 
     def include(self, other):
-        altUrls = ((self.alternativeUrls or frozenset())
-                   | frozenset((other.url,))
-                   | (other.alternativeUrls or frozenset()))
+        altUrls = ((self.alternativeUrls or set())
+                   | set((other.url,))
+                   | (other.alternativeUrls or set()))
         self.setAlternativeUrls(altUrls)
 
         if (not self.location
@@ -193,7 +193,7 @@ class RawEvent:
                                      '\n\n',
                                      *other.description))
 
-        self.setLinks(self.links | (other.links or frozenset()))
+        self.setLinks(self.links | (other.links or set()))
 
         if not self.audience:
             self.setAudience(other.audience)
@@ -210,7 +210,14 @@ class RawEvent:
         event['UID'] = self.url
         event['SUMMARY'] = self.title
         event.add('DTSTART', self.start)
-        event.add('DTEND', self.getEnd(delta=defaultEventLength))
+        if 'TZID' not in event['DTSTART'].params and isinstance(self.start, datetime):
+            tzid = icalendar.parser.tzid_from_dt(self.start)
+            event['DTSTART'].params['TZID'] = tzid
+        end = self.getEnd(delta=defaultEventLength)
+        event.add('DTEND', end)
+        if 'TZID' not in event['DTEND'].params and isinstance(end, datetime):
+            tzid = icalendar.parser.tzid_from_dt(end)
+            event['DTEND'].params['TZID'] = tzid
         event['LOCATION'] = self.location
         event['DESCRIPTION'] = self._renderDescription()
         return event
@@ -246,7 +253,7 @@ class RawEvent:
             description = utils.HTMLToText.unstringifyTokens(jObj['description'])
             event.setDescription(description)
         if jObj['links']:
-            event.setLinks(frozenset(jObj['links']))
+            event.setLinks(jObj['links'])
         if jObj['audience']:
             event.setAudience(jObj['audience'])
         if jObj['status']:
@@ -781,7 +788,7 @@ class MercuryBackendCrawler(RemoteListCrawler):
         url = utils.normalizeURL(base=self.DOMAIN, url=url)
         updatedEventList = self.requester.fetchURL(url, json=True)
 
-        if updatedEventList:
+        if updatedEventList is not None:
             for eventId in updatedEventList:
                 url = self.EVENT_URL.format(eventId)
                 events.add(utils.normalizeURL(base=self.DOMAIN, url=url))
@@ -802,7 +809,7 @@ class MercuryBackendCrawler(RemoteListCrawler):
         location = utils.Soup.getTextAt(soup, self.SELECTOR_EVENT_LOCATION)
 
         description = utils.Soup.getTextAt(soup, self.SELECTOR_EVENT_DESCRIPTION)
-        links = frozenset()
+        links = set()
         if description:
             descSoup = BeautifulSoup(description, 'html.parser')
             description, links = utils.HTMLToText.tokenizeSoup(descSoup,
@@ -810,13 +817,13 @@ class MercuryBackendCrawler(RemoteListCrawler):
 
         relatedLinks = utils.Soup.getTextsAt(soup, self.SELECTOR_EVENT_LINKS)
         if relatedLinks:
-            links|= frozenset(relatedLinks)
+            links|= set(relatedLinks)
 
         urls = utils.Soup.getTextsAt(soup, self.SELECTOR_EVENT_URLS)
         if urls:
-            links|= frozenset(urls)
+            links|= set(urls)
         links = map(utils.normalizeURL(base=eventURL), links)
-        links = frozenset(filter(None, links))
+        links = set(filter(None, links))
 
         audience = utils.Soup.getTextsAt(soup, self.SELECTOR_EVENT_AUDIENCE)
         if audience:
@@ -1081,9 +1088,9 @@ class ChemistryGatechEduCrawler(RemoteListCrawler):
         description, links = utils.Soup.tokenizeElemAt(soup,
                                                        self.SELECTOR_EVENT_DESCRIPTION,
                                                        base=eventURL)
-        links|= frozenset(utils.Soup.getLinksAt(soup, self.SELECTOR_EVENT_LINKS))
+        links|= set(utils.Soup.getLinksAt(soup, self.SELECTOR_EVENT_LINKS))
         links = map(utils.normalizeURL(base=eventURL), links)
-        links = frozenset(filter(None, links))
+        links = set(filter(None, links))
         event.setDescription(description)
         event.setLinks(links)
 
@@ -1170,7 +1177,7 @@ class CareerGatechEduCrawler(RemoteListCrawler):
                                                        self.SELECTOR_EVENT_DESCRIPTION,
                                                        base=url)
         links = map(utils.normalizeURL(base=self.URL), links)
-        links = frozenset(filter(None, links))
+        links = set(filter(None, links))
 
         rawEvent.setDescription(description)
         rawEvent.setLinks(links)
@@ -1237,7 +1244,7 @@ class CampuslabsComCrawler(RemoteListCrawler):
                                                                base=url,
                                                                customStyle=self.DESCRIPTION_STYLE)
             links = map(utils.normalizeURL(base=eventURL), links)
-            links = frozenset(filter(None, links))
+            links = set(filter(None, links))
 
             rawEvent.setDescription(description)
             rawEvent.setLinks(links)
