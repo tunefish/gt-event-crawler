@@ -412,7 +412,7 @@ class DedupEventSet:
 class Crawler:
     def __init__(self, config):
         self.config = config
-        self.calendars = list()
+        self.crawlers = list()
         self.events = defaultdict(set)
         self.crawledEvents = DedupEventSet(statusCodes=config.statusCodes,
                                            crawlerWeights=config.crawlerWeights)
@@ -428,88 +428,88 @@ class Crawler:
         if isinstance(crawler, RemoteCalendarCrawler):
             # crawler has already been instantiated, just add it
             if crawler not in self.calendars:
-                self.calendars.append(crawler)
+                self.crawlers.append(crawler)
         elif (isinstance(crawler, type)
               and issubclass(crawler, RemoteCalendarCrawler)):
             if not any(c.__class__ == crawler for c in self.calendars):
-                self.calendars.append(crawler(self.config, self.requester))
+                self.crawlers.append(crawler(self.config, self.requester))
         else:
             raise ValueError(f'{crawler} is not a calendar crawler (RemoteCalendarCrawler)')
 
     def discover(self, skipExceptions=3):
         logger.info('Start fetching events for each calendar')
-        stats = {cal: 0 for cal in self.calendars}
+        stats = {cal: 0 for cal in self.crawlers}
 
-        def _handleError(calendar, e):
-            logger.error(f'An error occurred while trying to obtain a list of events for calendar {calendar.IDENTIFIER}')
+        def _handleError(crawler, e):
+            logger.error(f'An error occurred while trying to obtain a list of events for calendar {crawler.IDENTIFIER}')
             logger.exception(e)
 
         t_start = time_monotonic()
-        for calendar in self.calendars:
+        for crawler in self.crawlers:
             exceptionCount = 0
             calDate = datetime.now()
             events = None
-            t_calendar = time_monotonic()
+            t_crawler = time_monotonic()
 
-            if isinstance(calendar, RemoteListCrawler):
+            if isinstance(crawler, RemoteListCrawler):
                 try:
-                    self.events[calendar]|= calendar.getEventList()
+                    self.events[crawler]|= crawler.getEventList()
                 except Exception as e:
-                  _handleError(calendar, e)
-            elif isinstance(calendar, RemoteMonthCrawler):
+                  _handleError(crawler, e)
+            elif isinstance(crawler, RemoteMonthCrawler):
                 while exceptionCount < skipExceptions:
                     try:
-                        events = calendar.getMonthEventList(year=calDate.year,
+                        events = crawler.getMonthEventList(year=calDate.year,
                                                             month=calDate.month)
-                        logger.debug(f'Found {len(events)} events this round for {calendar.IDENTIFIER}')
+                        logger.debug(f'Found {len(events)} events this round for {crawler.IDENTIFIER}')
                     except Exception as e:
-                        _handleError(calendar, e)
+                        _handleError(crawler, e)
                         exceptionCount+= 1
                     if not events:
                         break
-                    self.events[calendar]|= events
+                    self.events[crawler]|= events
                     calDate = utils.addMonths(calDate, 1)
-            elif isinstance(calendar, RemoteWeekCrawler):
+            elif isinstance(crawler, RemoteWeekCrawler):
                 while exceptionCount < skipExceptions:
                     try:
-                        week = calDate.isocalendar()[1]
-                        events = calendar.getWeekEventList(year=calDate.year,
-                                                           week=week)
-                        logger.debug(f'Found {len(events)} events this round for {calendar.IDENTIFIER}')
+                        week = calDate.isocrawler()[1]
+                        events = crawler.getWeekEventList(year=calDate.year,
+                                                          week=week)
+                        logger.debug(f'Found {len(events)} events this round for {crawler.IDENTIFIER}')
                     except Exception as e:
-                        _handleError(calendar, e)
+                        _handleError(crawler, e)
                         exceptionCount+= 1
                     if not events:
                         break
-                    self.events[calendar]|= events
+                    self.events[crawler]|= events
                     calDate = calDate + timedelta(days=7)
-            elif isinstance(calendar, RemoteDayCrawler):
+            elif isinstance(crawler, RemoteDayCrawler):
                 while exceptionCount < skipExceptions:
                     try:
-                        events = calendar.getDayEventList(year=calDate.year,
+                        events = crawler.getDayEventList(year=calDate.year,
                                                           month=calDate.month,
                                                           day=calDate.day)
-                        logger.debug(f'Found {len(events)} events this round for {calendar.IDENTIFIER}')
+                        logger.debug(f'Found {len(events)} events this round for {crawler.IDENTIFIER}')
                     except Exception as e:
-                        _handleError(calendar, e)
+                        _handleError(crawler, e)
                         exceptionCount+= 1
                     if not events:
                         break
-                    self.events[calendar]|= events
+                    self.events[crawler]|= events
                     calDate += timedelta(days=1)
             else:
-                logger.error(f'Unknown calendar type {type(calendar)}')
+                logger.error(f'Unknown calendar type {type(crawler)}')
                 continue
 
-            stats[calendar]+= time_monotonic() - t_calendar
-            logger.debug(f'Found {len(self.events[calendar])} events in total for {calendar.IDENTIFIER}')
+            stats[crawler]+= time_monotonic() - t_crawler
+            logger.debug(f'Found {len(self.events[crawler])} events in total for {crawler.IDENTIFIER}')
 
         t_end = time_monotonic()
         logger.info(f'Event discovery took {t_end - t_start}s')
 
         tableData = tuple((cal.IDENTIFIER, len(self.events[cal]), stats[cal])
-                          for cal in self.calendars)
-        headers = ('Calendar', 'Events', 'Processing Time (s)')
+                          for cal in self.crawlers)
+        headers = ('Crawler', 'Events', 'Processing Time (s)')
         footers = ('Total',
                    sum(map(len, self.events.values())),
                    sum(stats.values()))
@@ -523,51 +523,51 @@ class Crawler:
                        'success': 0,
                        'events': len(self.events[cal]),
                        'time': 0}
-                 for cal in self.calendars}
+                 for cal in self.crawlers}
 
         logger.info('Start fetching event details')
         hasEvents = True
         while hasEvents:
             hasEvents = False
-            for calendar in self.calendars:
-                t_calendar = time_monotonic()
-                if self.events[calendar]:
+            for crawler in self.crawlers:
+                t_crawler = time_monotonic()
+                if self.events[crawler]:
                     hasEvents = True
-                    ev = self.events[calendar].pop()
+                    ev = self.events[crawler].pop()
                     if ev is None:
-                        loggger.warning(f'{calendar.IDENTIFIER} got None event!')
+                        loggger.warning(f'{crawler.IDENTIFIER} got None event!')
                         continue
 
                     try:
                         if not isinstance(ev, RawEvent):
-                            ev = calendar.getEventDetails(ev)
+                            ev = crawler.getEventDetails(ev)
                         if ev is not None:
                             if isinstance(ev, RawEvent):
                                 self._addCrawledEvent(ev)
-                                stats[calendar]['success']+= 1
+                                stats[crawler]['success']+= 1
                             elif isinstance(ev, (set, frozenset, tuple, list)):
                                 for event in ev:
                                     self._addCrawledEvent(event)
-                                stats[calendar]['success']+= 1 if ev else 0
+                                stats[crawler]['success']+= 1 if ev else 0
                         else:
-                            stats[calendar]['fail']+= 1
+                            stats[crawler]['fail']+= 1
                     except Exception as e:
                         logger.error(f'An error occurred while trying to obtain the details of event {ev}')
                         logger.exception(e)
-                        stats[calendar]['fail']+= 1
-                stats[calendar]['time']+= time_monotonic() - t_calendar
+                        stats[crawler]['fail']+= 1
+                stats[crawler]['time']+= time_monotonic() - t_crawler
 
         t_end = time_monotonic()
         logger.info(f'Event resolution took {t_end - t_start}s')
 
-        headers = ('Calendar', 'Failure', 'Success', 'Total', 'Processing Time (s)')
+        headers = ('Crawler', 'Failure', 'Success', 'Total', 'Processing Time (s)')
         footers = ('Total',
                    sum(map(operator.itemgetter('fail'), stats.values())),
                    sum(map(operator.itemgetter('success'), stats.values())),
                    sum(map(operator.itemgetter('events'), stats.values())),
                    sum(map(operator.itemgetter('time'), stats.values())))
         tableData = tuple((cal.IDENTIFIER, *stats[cal].values())
-                          for cal in self.calendars)
+                          for cal in self.crawlers)
         logger.info('Statistics:\n' + utils.tabulateWithHeaderFooter(tableData,
                                                                      headers,
                                                                      footers))
