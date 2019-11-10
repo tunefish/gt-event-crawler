@@ -155,62 +155,64 @@ class RawEvent:
     def getDescription(self):
         if not self.description:
             return ''
+        else:
+            return utils.HTMLToText.renderCleanTokens(self.description)
 
-        sLinks = (self.url, *(sorted(self.alternativeUrls or ())))
-        description, _ = utils.HTMLToText.renderTokens(self.description,
-                                                       (),
-                                                       specialLinks=sLinks)
-        return description
-
-    def include(self, other):
+    def merge(self, other):
+        result = RawEvent(self.crawler,
+                          self.url,
+                          self.title,
+                          self.start,
+                          end=self.end)
         altUrls = ((self.alternativeUrls or set())
                    | set((other.url,))
                    | (other.alternativeUrls or set()))
-        self.setAlternativeUrls(altUrls)
+        result.setAlternativeUrls(altUrls)
 
         if (not self.location
             or (other.location
                 and self.location.lower() in other.location.lower())):
-            # update location if other.location is more specific
-            self.setLocation(other.location)
-
-        if not self.extras:
-            self.setExtras(other.extras)
-        elif other.extras:
-            self.setExtras(utils.mergeStringLists(self.extras, other.extras))
+            # use other location other.location is more specific
+            result.setLocation(other.location)
+        else:
+            result.setLocation(self.location)
 
         if not self.description:
-            self.setDescription(other.description)
+            result.setDescription(other.description)
         elif other.description:
             # get rid of formatting, we only care about the unformatted text
             desc = self.getDescription()
             otherDesc = other.getDescription()
             if utils.isSubsequenceByWord(desc, otherDesc):
-                self.setDescription(other.description)
+                result.setDescription(other.description)
             elif not utils.isSubsequenceByWord(otherDesc, desc):
                 logger.warning(f'The event {self} from {self.url} and {other.url} have different descriptions!')
-                self.setDescription((*self.description,
-                                     '\n\n',
-                                     *other.description))
+                result.setDescription((*self.description,
+                                      '\n\n',
+                                      *other.description))
+            else:
+                result.setDescription(self.description)
+        else:
+            result.setDescription(self.description)
 
-        self.setLinks(self.links | (other.links or set()))
-
-        if not self.audience:
-            self.setAudience(other.audience)
-        elif other.audience:
-            self.setAudience(utils.mergeStringLists(self.audience, other.audience))
+        result.setLinks(self.links | (other.links or set()))
+        result.setExtras(utils.mergeStringLists(self.extras, other.extras))
+        result.setAudience(utils.mergeStringLists(self.audience, other.audience))
 
         if not self.status:
-            self.setStatus(other.status)
+            result.setStatus(other.status)
+        else:
+            result.setStatus(self.status)
 
-        return self
+        return result
 
     def toICAL(self, defaultEventLength=None):
         event = icalendar.Event()
         event['UID'] = self.url
         event['SUMMARY'] = self.title
         event.add('DTSTART', self.start)
-        if 'TZID' not in event['DTSTART'].params and isinstance(self.start, datetime):
+        if ('TZID' not in event['DTSTART'].params
+            and isinstance(self.start, datetime)):
             tzid = icalendar.parser.tzid_from_dt(self.start)
             event['DTSTART'].params['TZID'] = tzid
         end = self.getEnd(delta=defaultEventLength)
@@ -397,7 +399,7 @@ class DedupEventSet:
                 if events:
                     logger.info(f'Merging {event} from {event.url} with instances at {tuple(x.url for x in events)}')
                 for mergeEvent in events:
-                    event.include(mergeEvent)
+                    event = event.merge(mergeEvent)
                 yield event
 
     def iterUniqueEvents(self):

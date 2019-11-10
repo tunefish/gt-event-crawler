@@ -625,6 +625,11 @@ class HTMLToText:
         return tuple(map(_unstringify, stringifiedTokens))
 
     @staticmethod
+    def renderCleanTokens(tokens):
+        textFltr = lambda x: x is HTMLToText.WeakLinebreak or isinstance(x, str)
+        return HTMLToText.renderTokens(tuple(filter(textFltr, tokens)), ())[0]
+
+    @staticmethod
     def renderTokens(tokens, links, specialLinks=None):
         # Step 0: Init link map and determine required number of digits
         linkMap = NormalizedURLDict({link: -1 for link in links})
@@ -635,7 +640,7 @@ class HTMLToText:
             linkMap[link] = n
 
         counter = len(specialLinks) if specialLinks else 1
-        digits = intLen(len(linkMap))
+        digits = intLen(len(linkMap) - 1)
 
         # Step 1a: insert \n at WeakLinebreak tokens where necessary and replace
         #          ReplaceLink tokens with a referene to the link
