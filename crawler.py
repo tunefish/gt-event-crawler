@@ -637,8 +637,7 @@ class RemoteCalendarCrawler:
             elif event:
                 logger.debug(event)
         except ValueError as e:
-            logger.error('Cannot fetch information for %s%s',
-                         base=self.DOMAIN, url=eventURL)
+            logger.error(f'Cannot fetch information for {eventURL}')
             logger.exception(e)
             return None
 
@@ -688,7 +687,8 @@ class MercuryBackendCrawler(RemoteListCrawler):
         'view_args': '',
         'pager_element': 0,
         'ajax_html_ids': [
-            # this list is not strictly required by the server but we'll keep it not to break anything
+            # this list is not strictly required by the server
+            # but we'll keep it not to break anything
             'skip-link',
             'header',
             'logoWrapper',
@@ -1198,7 +1198,7 @@ class CampuslabsComCrawler(RemoteListCrawler):
         'orderByField': 'endsOn',
         'orderByDirection': 'ascending',
         'status': 'Approved',
-        'take': 10000,
+        'take': 100000,
         'query': '',
     }
 
