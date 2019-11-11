@@ -1,5 +1,6 @@
 import calendar
 import html
+import importlib
 import logging
 import math
 import operator
@@ -41,6 +42,40 @@ def firstOrNone(l):
 
 def itemsFromMapping(mapping):
     return mapping.items() if hasattr(mapping, 'items') else mapping
+
+
+def updateDictPath(dictionary, path, value, sep='.'):
+    *path, entryName = path.split(sep)
+
+    current = dictionary
+    for name in path:
+        entry = current.get(name, {})
+        current[name] = entry
+        current = entry
+
+    current[entryName] = value
+    return dictionary
+
+
+def importClass(name, baseModule=None):
+    path = name.split('.')
+    if baseModule:
+        path[0] = baseModule + path[0]
+
+    module = importlib.import_module(path[0])
+
+    # Find the requested class in the module/class tree
+    if path:
+        elem = module
+        for pName in path[1:]:
+            nextElem = getattr(elem, pName, None)
+            if nextElem is None:
+                raise ModuleNotFoundError(f'Cannot find {pName} of {elem} in path {name}')
+            elem = nextElem
+        clazz = elem
+    else:
+        clazz = module
+    return clazz
 
 
 def intLen(i):

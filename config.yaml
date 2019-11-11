@@ -1,0 +1,75 @@
+general:
+  # The user agent string used for issuing all requests
+  user_agent:           Mozilla/5.0 (compatible; CalendarBot)
+
+  # The log level (choose from NOTSET, DEBUG, INFO, WARNING, ERROR, CRITICAL)
+  log_level:            INFO
+
+# Parameters for token bucket used for outbout traffic throttling (per host)
+throttling:
+  max_tokens:           10
+  token_rate:           1.5
+
+crawler:
+  # Number of retries for each URL if it errors
+  retries:              3
+
+  # Number of seconds to wait until a request is reissued
+  retry_timeout:        7
+
+  # Events older than this amount of days will not be stored
+  backlog:              365
+
+  # Default settings for crawled events
+  defaults:
+    # Timezone to which time definitions are converted to if no timezone is mentioned
+    timezone:           US/Eastern
+
+    # The default event length in minutes if no end time is mentioned
+    event_length:       60
+
+# Defines a list of crawlers used for different calendar sources. For each crawler,
+# a weight must be defined which determines the order in which duplicate events
+# crawled from different sources are merged. The event with the highest source
+# weight serves as a base and others are merged into it in descending order.
+# Additional parameters specific to each crawler can be defined as well.
+crawlers:
+  mercury_gatech_edu.MercuryGatechEduCrawler:
+    weight:             100
+
+    # The mercury calendar only lists events by the time they were first posted.
+    # This parameter specifies how far back in time to search for events based on
+    # their posted date.
+    search_backlog:     30
+  career_gatech_edu.CareerGatechEduCrawler:
+    weight:             100
+  campuslabs_com.CampuslabsComCrawler:
+    weight:             90
+  chemistry_gatech_edu.ChemistryGatechEduCrawler:
+    weight:             50
+
+# Statuses which might be returned from one of the frontends/backends used to
+# determine how much we can trust the information regarding the event. Measured
+# on a scale from 0 (untrustworthy) to 100 (trustworthy). This information is also
+# used for determining the merge order, or to discard an event entirely if it is
+# completely untrustworthy
+status_codes:
+  approved:             100
+  published:            100
+  archived:             90
+  review:               60
+  draft:                50
+  canceled:             0
+  cancelled:            0
+  error:                0
+
+storage:
+  # Git repository used for storing all events
+  repository:           tunefish/testme
+
+  # Path to a JSON file in the git repository, used for storing the raw events
+  # so they can be merged in future if duplicates are found
+  json_file:            events.json
+
+  # Path to the ICS file in the git repository, to which all events will be exported
+  ics_file:             events.ics
