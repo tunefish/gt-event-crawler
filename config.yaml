@@ -65,7 +65,7 @@ status_codes:
 
 storage:
   # Git repository used for storing all events
-  repository:           tunefish/testme
+  repository:           tunefish/gt-events
 
   # Path to a JSON file in the git repository, used for storing the raw events
   # so they can be merged in future if duplicates are found
