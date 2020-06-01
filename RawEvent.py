@@ -132,10 +132,10 @@ class RawEvent:
         result.setExtras(utils.mergeStringLists(self.extras, other.extras))
         result.setAudience(utils.mergeStringLists(self.audience, other.audience))
 
-        if not self.status:
-            result.setStatus(other.status)
-        else:
+        if self.status:
             result.setStatus(self.status)
+        elif other.status:
+            result.setStatus(other.status)
 
         return result
 
